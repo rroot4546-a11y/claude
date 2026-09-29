@@ -1,0 +1,77 @@
+name: Android CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Install platform + build-tools
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Decode keystore (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > /tmp/release.jks
+          echo "KEYSTORE_FILE=/tmp/release.jks" >> "$GITHUB_ENV"
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+
+      - name: Build release APK
+        run: ./gradlew :app:assembleRelease -x lint --no-daemon
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Verify APK signature (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ls -la app/build/outputs/apk/release/
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload unsigned artifact (non-tag builds)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-android-unsigned
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Build installable debug APK
+        run: ./gradlew :app:assembleDebug -x lint --no-daemon
+
+      - name: Upload installable debug APK
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-android-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/app-release.apk
